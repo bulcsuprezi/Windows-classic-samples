@@ -348,8 +348,7 @@ HRESULT CaptureManager::StartPreview()
     }
 
     IMFCaptureSink *pSink = NULL;
-    IMFMediaType *pMediaType = NULL;
-    IMFMediaType *pMediaType2 = NULL;
+    IMFMediaType *pSinkMediaType = NULL;
     IMFCaptureSource *pSource = NULL;
 
     HRESULT hr = S_OK;
@@ -381,20 +380,59 @@ HRESULT CaptureManager::StartPreview()
             goto done;
         }
 
+        DWORD selectedStreamIndex;
+        IMFMediaType* pSelectedMediaType = NULL;
+
+        DWORD numStreams;
+        hr = pSource->GetDeviceStreamCount(&numStreams);
+        for (DWORD streamIndex = 0; streamIndex < numStreams; streamIndex++) {
+            MF_CAPTURE_ENGINE_STREAM_CATEGORY cat;
+            pSource->GetDeviceStreamCategory(streamIndex, &cat);
+            if (cat != MF_CAPTURE_ENGINE_STREAM_CATEGORY_VIDEO_PREVIEW &&
+                cat != MF_CAPTURE_ENGINE_STREAM_CATEGORY_VIDEO_CAPTURE)
+            {
+                continue;
+            }
+            for (DWORD mediaTypeIndex = 0; ; mediaTypeIndex++) {
+                IMFMediaType* pNativeMediaType = NULL;
+                hr = pSource->GetAvailableDeviceMediaType(streamIndex, mediaTypeIndex, &pNativeMediaType);
+                if (hr == MF_E_NO_MORE_TYPES) {
+                    break;
+                }
+                GUID subtype;
+                pNativeMediaType->GetGUID(MF_MT_SUBTYPE, &subtype);
+                if (subtype != MFVideoFormat_NV12) {
+                    goto next;
+                }
+                UINT32 width, height;
+                MFGetAttributeSize(pNativeMediaType, MF_MT_FRAME_SIZE, &width, &height);
+                if (width != 1920 || height != 1080) {
+                    goto next;
+                }
+                pSelectedMediaType = pNativeMediaType;
+                pSelectedMediaType->AddRef();
+                selectedStreamIndex = streamIndex;
+                goto found;
+            next:
+                SafeRelease(&pNativeMediaType);
+            }
+        }
+
         // Configure the video format for the preview sink.
-        hr = pSource->GetCurrentDeviceMediaType((DWORD)MF_CAPTURE_ENGINE_PREFERRED_SOURCE_STREAM_FOR_VIDEO_PREVIEW , &pMediaType);
+        hr = pSource->GetCurrentDeviceMediaType((DWORD)MF_CAPTURE_ENGINE_PREFERRED_SOURCE_STREAM_FOR_VIDEO_PREVIEW, &pSelectedMediaType);
+        if (FAILED(hr)) {
+            goto done;
+        }
+        selectedStreamIndex = (DWORD)MF_CAPTURE_ENGINE_PREFERRED_SOURCE_STREAM_FOR_VIDEO_PREVIEW;
+
+    found:
+        hr = CloneVideoMediaType(pSelectedMediaType, MFVideoFormat_RGB32, &pSinkMediaType);
         if (FAILED(hr))
         {
             goto done;
         }
 
-        hr = CloneVideoMediaType(pMediaType, MFVideoFormat_RGB32, &pMediaType2);
-        if (FAILED(hr))
-        {
-            goto done;
-        }
-
-        hr = pMediaType2->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+        hr = pSinkMediaType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
         if (FAILED(hr))
         {
             goto done;
@@ -402,7 +440,7 @@ HRESULT CaptureManager::StartPreview()
 
         // Connect the video stream to the preview sink.
         DWORD dwSinkStreamIndex;
-        hr = m_pPreview->AddStream((DWORD)MF_CAPTURE_ENGINE_PREFERRED_SOURCE_STREAM_FOR_VIDEO_PREVIEW,  pMediaType2, NULL, &dwSinkStreamIndex);        
+        hr = m_pPreview->AddStream((DWORD)selectedStreamIndex,  pSinkMediaType, NULL, &dwSinkStreamIndex);
         if (FAILED(hr))
         {
             goto done;
@@ -424,8 +462,7 @@ HRESULT CaptureManager::StartPreview()
     }
 done:
     SafeRelease(&pSink);
-    SafeRelease(&pMediaType);
-    SafeRelease(&pMediaType2);
+    SafeRelease(&pSinkMediaType);
     SafeRelease(&pSource);
 
     return hr;
